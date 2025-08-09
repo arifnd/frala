@@ -1,7 +1,13 @@
 name: Check, Build, and Push Docker Images
 
-# on:
-#   workflow_dispatch:
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Test scenario tags'
+        required: false
+        type: boolean
+
 #   schedule:
 #     - cron: '0 3 * * *'   # Runs daily at 3 AM UTC
 
