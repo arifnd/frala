@@ -28,13 +28,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Restore digests file if exists
-        id: restore-digests
-        uses: actions/download-artifact@v3
-        with:
-          name: digests
-          path: .
-
       - name: Run build script
         run: |
           chmod +x ./check_build_push.sh
