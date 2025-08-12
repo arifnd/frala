@@ -1,2 +1,8 @@
 latest
 alpine
+php8.4
+php8.4-alpine
+php8.3
+php8.3-alpine
+php8.2
+php8.2-alpine
