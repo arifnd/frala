@@ -8,4 +8,6 @@ RUN install-php-extensions \
         @composer \
         intl \
         pdo_mysql \
+        pdo_pgsql \
+        redis \
         zip
