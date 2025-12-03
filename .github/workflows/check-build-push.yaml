@@ -10,6 +10,9 @@ jobs:
   build-push:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write 
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -42,5 +45,3 @@ jobs:
             git commit -m "Update digests.txt [skip ci]"
             git push
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
