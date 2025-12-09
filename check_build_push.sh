@@ -24,43 +24,69 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     TAG="${TAG%"${TAG##*[![:space:]]}"}"
     [[ -z "$TAG" || "$TAG" =~ ^# ]] && continue
 
-    echo "Processing tag: $TAG"
+    echo "==============================="
+    echo " Processing tag: $TAG"
+    echo "==============================="
 
+    # Fetch digest
     REMOTE_DIGEST=$(docker buildx imagetools inspect "${BASE_IMAGE}:${TAG}" 2>/dev/null \
         | grep -m1 '^Digest:' \
         | awk '{print $2}')
 
     if [[ -z "$REMOTE_DIGEST" ]]; then
-        echo "⚠️ Could not get digest for ${BASE_IMAGE}:${TAG}, keeping old."
+        echo "⚠️ Cannot fetch remote digest for ${BASE_IMAGE}:${TAG}. Keeping old."
         if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
             echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
         fi
         continue
     fi
 
-    OLD_DIGEST="${LOCAL_DIGESTS[$TAG]:-}"
-    echo "Stored digest: ${OLD_DIGEST:-<none>}"
+    OLD_DIGEST="${LOCAL_DIGESTS[$TAG]:-<none>}"
+
+    echo "Stored digest: $OLD_DIGEST"
     echo "Remote digest: $REMOTE_DIGEST"
 
-    if [[ "$OLD_DIGEST" != "$REMOTE_DIGEST" ]]; then
-        echo "🛠️ Building image for tag $TAG..."
+    if [[ "${LOCAL_DIGESTS[$TAG]:-}" != "$REMOTE_DIGEST" ]]; then
+        echo "🛠️ Digest changed → building image for $TAG"
 
-        if docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .; then
-            echo "⬆️ Push image for tag $TAG."
+        # -------------------------------------------
+        # SAFE BUILD SECTION (does not stop the script)
+        # -------------------------------------------
+        set +e
+        docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .
+        build_status=$?
+        set -e
+
+        if [[ $build_status -eq 0 ]]; then
+            echo "⬆️ Push image for tag $TAG"
+
+            set +e
             docker push "${IMAGE}:${TAG}"
+            push_status=$?
+            set -e
 
-            echo "✅ Digest changed or missing for tag $TAG"
-            changed=1
+            if [[ $push_status -eq 0 ]]; then
+                echo "$TAG $REMOTE_DIGEST" >> "$TMP_DIGESTS_FILE"
+                echo "✅ Digest updated for tag $TAG"
+                changed=1
+            else
+                echo "⚠️ Push failed for $TAG. Keeping old digest."
+                echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
+            fi
+
         else
-            echo "⚠️ Build failed for tag $TAG. Keeping old digest if any."
+            echo "⚠️ Build failed for $TAG. Keeping old digest."
+            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
         fi
+
     else
-        echo "ℹ️ Digest unchanged for tag $TAG"
+        echo "ℹ️ Digest unchanged. Keeping old digest."
+        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
     fi
 
-    echo "$TAG $REMOTE_DIGEST" >> "$TMP_DIGESTS_FILE"
 done < "$TAG_FILE"
 
+# Replace final digest file
 mv "$TMP_DIGESTS_FILE" "$DIGESTS_FILE"
 
 if [[ "$changed" -eq 0 ]]; then
