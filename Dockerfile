@@ -1,4 +1,4 @@
-ARG IMAGE_TAG
+ARG IMAGE_TAG=latest
 
 FROM dunglas/frankenphp:${IMAGE_TAG}
 
