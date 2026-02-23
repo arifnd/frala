@@ -16,8 +16,10 @@ if [[ -f "$DIGESTS_FILE" ]]; then
     done < "$DIGESTS_FILE"
 fi
 
-TMP_DIGESTS_FILE=$(mktemp)
 changed=0
+
+# Truncate digests file to avoid duplicates on re-run
+> "$DIGESTS_FILE"
 
 while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     TAG="${TAG#"${TAG%%[![:space:]]*}"}"
@@ -36,7 +38,7 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     if [[ -z "$REMOTE_DIGEST" ]]; then
         echo "⚠️ Cannot fetch remote digest for ${BASE_IMAGE}:${TAG}. Keeping old."
         if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
-            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
+            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
         fi
         continue
     fi
@@ -66,28 +68,25 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
             set -e
 
             if [[ $push_status -eq 0 ]]; then
-                echo "$TAG $REMOTE_DIGEST" >> "$TMP_DIGESTS_FILE"
+                echo "$TAG $REMOTE_DIGEST" >> "$DIGESTS_FILE"
                 echo "✅ Digest updated for tag $TAG"
                 changed=1
             else
                 echo "⚠️ Push failed for $TAG. Keeping old digest."
-                echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
+                echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
             fi
 
         else
             echo "⚠️ Build failed for $TAG. Keeping old digest."
-            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
+            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
         fi
 
     else
         echo "ℹ️ Digest unchanged. Keeping old digest."
-        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS_FILE"
+        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
     fi
 
 done < "$TAG_FILE"
-
-# Replace final digest file
-mv "$TMP_DIGESTS_FILE" "$DIGESTS_FILE"
 
 if [[ "$changed" -eq 0 ]]; then
     echo "No digest changes detected."
