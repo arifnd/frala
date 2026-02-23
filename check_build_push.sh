@@ -31,11 +31,14 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     echo "==============================="
 
     # Fetch digest
+    set +e
     REMOTE_DIGEST=$(docker buildx imagetools inspect "${BASE_IMAGE}:${TAG}" 2>/dev/null \
         | grep -m1 '^Digest:' \
         | awk '{print $2}')
+    fetch_status=$?
+    set -e
 
-    if [[ -z "$REMOTE_DIGEST" ]]; then
+    if [[ $fetch_status -ne 0 || -z "$REMOTE_DIGEST" ]]; then
         echo "⚠️ Cannot fetch remote digest for ${BASE_IMAGE}:${TAG}. Keeping old."
         if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
             echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
