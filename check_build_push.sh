@@ -6,6 +6,9 @@ IMAGE="arifnd/frala"
 TAG_FILE="tags.txt"
 DIGESTS_FILE="digests.txt"
 
+TARGET_TAG="${1:-${TARGET_TAG:-all}}"
+[[ -z "$TARGET_TAG" ]] && TARGET_TAG="all"
+
 declare -A LOCAL_DIGESTS=()
 
 # Load existing digests
@@ -25,6 +28,13 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     TAG="${TAG#"${TAG%%[![:space:]]*}"}"
     TAG="${TAG%"${TAG##*[![:space:]]}"}"
     [[ -z "$TAG" || "$TAG" =~ ^# ]] && continue
+
+    if [[ "$TARGET_TAG" != "all" && "$TAG" != "$TARGET_TAG" ]]; then
+        if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
+            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
+        fi
+        continue
+    fi
 
     echo "==============================="
     echo " Processing tag: $TAG"
