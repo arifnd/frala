@@ -6,6 +6,7 @@ BASE_IMAGE="dunglas/frankenphp"
 IMAGE="arifnd/frala"
 TAG_FILE="tags.txt"
 DIGESTS_FILE="digests.txt"
+PLATFORMS="linux/amd64,linux/arm64"
 
 # Single source of truth for the moving-alias tags.
 # Bump this one line each PHP release:
@@ -35,10 +36,18 @@ apply_aliases() {
     [[ -n "${TAG_ALIASES[$tag]:-}" ]] || return 0
     for alias in ${TAG_ALIASES[$tag]}; do
         echo "🔖 Applying alias $alias → $tag"
-        docker tag "${IMAGE}:${tag}" "${IMAGE}:${alias}"
-        echo "⬆️ Push alias $alias"
-        docker push "${IMAGE}:${alias}"
+        docker buildx imagetools create -t "${IMAGE}:${alias}" "${IMAGE}:${tag}"
     done
+}
+
+build_and_push() {
+    local tag=$1
+    docker buildx build \
+        --platform "${PLATFORMS}" \
+        --build-arg IMAGE_TAG="$tag" \
+        -t "${IMAGE}:${tag}" \
+        --push \
+        .
 }
 
 fetch_remote_digest() {
@@ -100,17 +109,10 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
         continue
     fi
 
-    echo "🛠️ Digest changed → building image for $TAG"
+    echo "🛠️ Digest changed → building image for $TAG ($PLATFORMS)"
 
-    if ! docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .; then
-        echo "⚠️ Build failed for $TAG. Keeping old digest."
-        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
-        continue
-    fi
-
-    echo "⬆️ Push image for tag $TAG"
-    if ! docker push "${IMAGE}:${TAG}"; then
-        echo "⚠️ Push failed for $TAG. Keeping old digest."
+    if ! build_and_push "$TAG"; then
+        echo "⚠️ Build/push failed for $TAG. Keeping old digest."
         echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
         continue
     fi

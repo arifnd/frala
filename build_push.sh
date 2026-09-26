@@ -5,6 +5,7 @@ set -euo pipefail
 BASE_IMAGE="dunglas/frankenphp"
 IMAGE="arifnd/frala"
 TAG_FILE="tags.txt"
+PLATFORMS="linux/amd64,linux/arm64"
 
 # Single source of truth for the moving-alias tags.
 # Bump this one line each PHP release:
@@ -34,10 +35,18 @@ apply_aliases() {
     [[ -n "${TAG_ALIASES[$tag]:-}" ]] || return 0
     for alias in ${TAG_ALIASES[$tag]}; do
         echo "🔖 Applying alias $alias → $tag"
-        docker tag "${IMAGE}:${tag}" "${IMAGE}:${alias}"
-        echo "⬆️ Push alias $alias."
-        docker push "${IMAGE}:${alias}"
+        docker buildx imagetools create -t "${IMAGE}:${alias}" "${IMAGE}:${tag}"
     done
+}
+
+build_and_push() {
+    local tag=$1
+    docker buildx build \
+        --platform "${PLATFORMS}" \
+        --build-arg IMAGE_TAG="$tag" \
+        -t "${IMAGE}:${tag}" \
+        --push \
+        .
 }
 
 # ---------- preflight ----------
@@ -58,11 +67,8 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
 
     echo "Processing tag: $TAG"
 
-    echo "🛠️ Building image for tag $TAG..."
-    if docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .; then
-        echo "⬆️ Push image for tag $TAG."
-        docker push "${IMAGE}:${TAG}"
-
+    echo "🛠️ Building image for tag $TAG ($PLATFORMS)..."
+    if build_and_push "$TAG"; then
         apply_aliases "$TAG"
     else
         echo "⚠️ Build failed for tag $TAG. Keeping old digest if any."
