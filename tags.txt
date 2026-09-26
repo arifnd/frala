@@ -1,5 +1,3 @@
-latest
-alpine
 php8.5
 php8.5-alpine
 php8.4
