@@ -10,7 +10,7 @@ on:
         type: string
 
 #   schedule:
-#     - cron: '0 3 * * *'   # Runs daily at 3 AM UTC
+#     - cron: '0 3 * * 3'   # Runs every Wednesday at 10:00 UTC+7 (03:00 UTC)
 
 jobs:
   build-push:
