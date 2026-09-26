@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------- config ----------
 BASE_IMAGE="dunglas/frankenphp"
 IMAGE="arifnd/frala"
 TAG_FILE="tags.txt"
@@ -14,9 +15,48 @@ declare -A TAG_ALIASES=(["$LATEST_PHP"]="latest" ["${LATEST_PHP}-alpine"]="alpin
 TARGET_TAG="${1:-${TARGET_TAG:-all}}"
 [[ -z "$TARGET_TAG" ]] && TARGET_TAG="all"
 
+# ---------- helpers ----------
+trim() {
+    local s=$1
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "❌ Missing required command: $1" >&2
+        exit 1
+    }
+}
+
+apply_aliases() {
+    local tag=$1 alias
+    [[ -n "${TAG_ALIASES[$tag]:-}" ]] || return 0
+    for alias in ${TAG_ALIASES[$tag]}; do
+        echo "🔖 Applying alias $alias → $tag"
+        docker tag "${IMAGE}:${tag}" "${IMAGE}:${alias}"
+        echo "⬆️ Push alias $alias"
+        docker push "${IMAGE}:${alias}"
+    done
+}
+
+fetch_remote_digest() {
+    local tag=$1
+    docker buildx imagetools inspect "${BASE_IMAGE}:${tag}" \
+        --format '{{.Manifest.Digest}}' 2>/dev/null
+}
+
+# ---------- preflight ----------
+require_cmd docker
+docker info >/dev/null 2>&1 || {
+    echo "❌ Docker daemon is not running" >&2
+    exit 1
+}
+
+# ---------- state ----------
 declare -A LOCAL_DIGESTS=()
 
-# Load existing digests
 if [[ -f "$DIGESTS_FILE" ]]; then
     while read -r tag digest; do
         [[ -z "$tag" || "$tag" =~ ^# ]] && continue
@@ -26,18 +66,18 @@ fi
 
 changed=0
 
-# Truncate digests file to avoid duplicates on re-run
-> "$DIGESTS_FILE"
+# Write results to a temp file, then swap in atomically.
+TMP_DIGESTS="$(mktemp)"
+trap 'rm -f "$TMP_DIGESTS"' EXIT
 
+# ---------- main ----------
 while IFS= read -r TAG || [[ -n "$TAG" ]]; do
-    TAG="${TAG#"${TAG%%[![:space:]]*}"}"
-    TAG="${TAG%"${TAG##*[![:space:]]}"}"
+    TAG="$(trim "$TAG")"
     [[ -z "$TAG" || "$TAG" =~ ^# ]] && continue
 
+    # Non-target tags are carried over unchanged.
     if [[ "$TARGET_TAG" != "all" && "$TAG" != "$TARGET_TAG" ]]; then
-        if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
-            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
-        fi
+        [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]] && echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
         continue
     fi
 
@@ -45,75 +85,44 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
     echo " Processing tag: $TAG"
     echo "==============================="
 
-    # Fetch digest
-    set +e
-    REMOTE_DIGEST=$(docker buildx imagetools inspect "${BASE_IMAGE}:${TAG}" 2>/dev/null \
-        | grep -m1 '^Digest:' \
-        | awk '{print $2}')
-    fetch_status=$?
-    set -e
-
-    if [[ $fetch_status -ne 0 || -z "$REMOTE_DIGEST" ]]; then
+    if ! REMOTE_DIGEST="$(fetch_remote_digest "$TAG")" || [[ -z "$REMOTE_DIGEST" ]]; then
         echo "⚠️ Cannot fetch remote digest for ${BASE_IMAGE}:${TAG}. Keeping old."
-        if [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]]; then
-            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
-        fi
+        [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]] && echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
         continue
     fi
 
-    OLD_DIGEST="${LOCAL_DIGESTS[$TAG]:-<none>}"
-
-    echo "Stored digest: $OLD_DIGEST"
+    echo "Stored digest: ${LOCAL_DIGESTS[$TAG]:-<none>}"
     echo "Remote digest: $REMOTE_DIGEST"
 
-    if [[ "${LOCAL_DIGESTS[$TAG]:-}" != "$REMOTE_DIGEST" ]]; then
-        echo "🛠️ Digest changed → building image for $TAG"
-
-        # -------------------------------------------
-        # SAFE BUILD SECTION (does not stop the script)
-        # -------------------------------------------
-        set +e
-        docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .
-        build_status=$?
-        set -e
-
-        if [[ $build_status -eq 0 ]]; then
-            echo "⬆️ Push image for tag $TAG"
-
-            set +e
-            docker push "${IMAGE}:${TAG}"
-            push_status=$?
-            set -e
-
-            if [[ $push_status -eq 0 ]]; then
-                if [[ -n "${TAG_ALIASES[$TAG]:-}" ]]; then
-                    for ALIAS in ${TAG_ALIASES[$TAG]}; do
-                        echo "🔖 Applying alias $ALIAS → $TAG"
-                        docker tag "${IMAGE}:${TAG}" "${IMAGE}:${ALIAS}"
-                        echo "⬆️ Push alias $ALIAS"
-                        docker push "${IMAGE}:${ALIAS}"
-                    done
-                fi
-
-                echo "$TAG $REMOTE_DIGEST" >> "$DIGESTS_FILE"
-                echo "✅ Digest updated for tag $TAG"
-                changed=1
-            else
-                echo "⚠️ Push failed for $TAG. Keeping old digest."
-                echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
-            fi
-
-        else
-            echo "⚠️ Build failed for $TAG. Keeping old digest."
-            echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
-        fi
-
-    else
+    if [[ "${LOCAL_DIGESTS[$TAG]:-}" == "$REMOTE_DIGEST" ]]; then
         echo "ℹ️ Digest unchanged. Keeping old digest."
-        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$DIGESTS_FILE"
+        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        continue
     fi
 
+    echo "🛠️ Digest changed → building image for $TAG"
+
+    if ! docker build --build-arg IMAGE_TAG="$TAG" -t "${IMAGE}:${TAG}" .; then
+        echo "⚠️ Build failed for $TAG. Keeping old digest."
+        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        continue
+    fi
+
+    echo "⬆️ Push image for tag $TAG"
+    if ! docker push "${IMAGE}:${TAG}"; then
+        echo "⚠️ Push failed for $TAG. Keeping old digest."
+        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        continue
+    fi
+
+    apply_aliases "$TAG"
+
+    echo "$TAG $REMOTE_DIGEST" >> "$TMP_DIGESTS"
+    echo "✅ Digest updated for tag $TAG"
+    changed=1
 done < "$TAG_FILE"
+
+mv "$TMP_DIGESTS" "$DIGESTS_FILE"
 
 if [[ "$changed" -eq 0 ]]; then
     echo "No digest changes detected."

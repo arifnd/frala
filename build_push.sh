@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------- config ----------
 BASE_IMAGE="dunglas/frankenphp"
 IMAGE="arifnd/frala"
 TAG_FILE="tags.txt"
@@ -13,11 +14,42 @@ declare -A TAG_ALIASES=(["$LATEST_PHP"]="latest" ["${LATEST_PHP}-alpine"]="alpin
 TARGET_TAG="${1:-${TARGET_TAG:-all}}"
 [[ -z "$TARGET_TAG" ]] && TARGET_TAG="all"
 
+# ---------- helpers ----------
+trim() {
+    local s=$1
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "❌ Missing required command: $1" >&2
+        exit 1
+    }
+}
+
+apply_aliases() {
+    local tag=$1 alias
+    [[ -n "${TAG_ALIASES[$tag]:-}" ]] || return 0
+    for alias in ${TAG_ALIASES[$tag]}; do
+        echo "🔖 Applying alias $alias → $tag"
+        docker tag "${IMAGE}:${tag}" "${IMAGE}:${alias}"
+        echo "⬆️ Push alias $alias."
+        docker push "${IMAGE}:${alias}"
+    done
+}
+
+# ---------- preflight ----------
+require_cmd docker
+docker info >/dev/null 2>&1 || {
+    echo "❌ Docker daemon is not running" >&2
+    exit 1
+}
+
+# ---------- main ----------
 while IFS= read -r TAG || [[ -n "$TAG" ]]; do
-    # strip leading/trailing whitespace
-    TAG="${TAG#"${TAG%%[![:space:]]*}"}"
-    TAG="${TAG%"${TAG##*[![:space:]]}"}"
-  
+    TAG="$(trim "$TAG")"
     [[ -z "$TAG" || "$TAG" =~ ^# ]] && continue
 
     if [[ "$TARGET_TAG" != "all" && "$TAG" != "$TARGET_TAG" ]]; then
@@ -31,14 +63,7 @@ while IFS= read -r TAG || [[ -n "$TAG" ]]; do
         echo "⬆️ Push image for tag $TAG."
         docker push "${IMAGE}:${TAG}"
 
-        if [[ -n "${TAG_ALIASES[$TAG]:-}" ]]; then
-            for ALIAS in ${TAG_ALIASES[$TAG]}; do
-                echo "🔖 Applying alias $ALIAS → $TAG"
-                docker tag "${IMAGE}:${TAG}" "${IMAGE}:${ALIAS}"
-                echo "⬆️ Push alias $ALIAS."
-                docker push "${IMAGE}:${ALIAS}"
-            done
-        fi
+        apply_aliases "$TAG"
     else
         echo "⚠️ Build failed for tag $TAG. Keeping old digest if any."
     fi
