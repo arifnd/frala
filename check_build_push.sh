@@ -92,11 +92,20 @@ fetch_remote_digest() {
         --format '{{.Manifest.Digest}}' 2>/dev/null
 }
 
+# Only carry a tag over when a previous digest exists (avoids blank rows).
+carry_over() {
+    local tag=$1
+    if [[ -n "${LOCAL_DIGESTS[$tag]:-}" ]]; then
+        echo "$tag ${LOCAL_DIGESTS[$tag]}" >> "$TMP_DIGESTS"
+    fi
+}
+
 # ---------- preflight ----------
 preflight
 
 # ---------- state ----------
 declare -A LOCAL_DIGESTS=()
+declare -a FAILED_TAGS=()
 
 if [[ -f "$DIGESTS_FILE" ]]; then
     while read -r tag digest; do
@@ -115,7 +124,7 @@ trap 'rm -f "$TMP_DIGESTS"' EXIT
 while IFS= read -r TAG; do
     # Non-target tags are carried over unchanged.
     if [[ "$TARGET_TAG" != "all" && "$TAG" != "$TARGET_TAG" ]]; then
-        [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]] && echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        carry_over "$TAG"
         continue
     fi
 
@@ -125,7 +134,7 @@ while IFS= read -r TAG; do
 
     if ! REMOTE_DIGEST="$(fetch_remote_digest "$TAG")" || [[ -z "$REMOTE_DIGEST" ]]; then
         echo "⚠️ Cannot fetch remote digest for ${BASE_IMAGE}:${TAG}. Keeping old."
-        [[ -n "${LOCAL_DIGESTS[$TAG]:-}" ]] && echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        carry_over "$TAG"
         continue
     fi
 
@@ -134,7 +143,7 @@ while IFS= read -r TAG; do
 
     if [[ "${LOCAL_DIGESTS[$TAG]:-}" == "$REMOTE_DIGEST" ]]; then
         echo "ℹ️ Digest unchanged. Keeping old digest."
-        echo "$TAG ${LOCAL_DIGESTS[$TAG]}" >> "$TMP_DIGESTS"
+        carry_over "$TAG"
         continue
     fi
 
@@ -142,11 +151,15 @@ while IFS= read -r TAG; do
 
     if ! build_and_push "$TAG"; then
         echo "⚠️ Build/push failed for $TAG. Keeping old digest."
-        echo "$TAG ${LOCAL_DIGESTS[$TAG]:-}" >> "$TMP_DIGESTS"
+        carry_over "$TAG"
+        FAILED_TAGS+=("$TAG:build")
         continue
     fi
 
-    apply_aliases "$TAG"
+    if ! apply_aliases "$TAG"; then
+        echo "⚠️ Alias tagging failed for $TAG (image itself pushed)"
+        FAILED_TAGS+=("$TAG:alias")
+    fi
 
     echo "$TAG $REMOTE_DIGEST" >> "$TMP_DIGESTS"
     echo "✅ Digest updated for tag $TAG"
@@ -159,4 +172,10 @@ if [[ "$changed" -eq 0 ]]; then
     echo "No digest changes detected."
 else
     echo "Digest file updated with changes."
+fi
+
+# ---------- summary ----------
+if (( ${#FAILED_TAGS[@]} > 0 )); then
+    echo "❌ Failed tags: ${FAILED_TAGS[*]}" >&2
+    exit 1
 fi

@@ -88,6 +88,9 @@ build_and_push() {
 # ---------- preflight ----------
 preflight
 
+# ---------- state ----------
+declare -a FAILED_TAGS=()
+
 # ---------- main ----------
 while IFS= read -r TAG; do
     if [[ "$TARGET_TAG" != "all" && "$TAG" != "$TARGET_TAG" ]]; then
@@ -98,8 +101,18 @@ while IFS= read -r TAG; do
 
     echo "🛠️ Building image for tag $TAG ($PLATFORMS)..."
     if build_and_push "$TAG"; then
-        apply_aliases "$TAG"
+        if ! apply_aliases "$TAG"; then
+            echo "⚠️ Alias tagging failed for $TAG (image itself pushed)"
+            FAILED_TAGS+=("$TAG:alias")
+        fi
     else
         echo "⚠️ Build failed for tag $TAG. Keeping old digest if any."
+        FAILED_TAGS+=("$TAG:build")
     fi
 done < <(read_tags)
+
+# ---------- summary ----------
+if (( ${#FAILED_TAGS[@]} > 0 )); then
+    echo "❌ Failed tags: ${FAILED_TAGS[*]}" >&2
+    exit 1
+fi
