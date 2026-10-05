@@ -40,8 +40,9 @@ jobs:
           chmod +x ./check_build_push.sh
           ./check_build_push.sh
         env:
-          IMAGE: ${{ env.IMAGE }}
-          TARGET_TAG: ${{ github.event.inputs.tag }}
+          IMAGE: arifnd/frala
+          PLATFORMS: linux/amd64,linux/arm64
+          TARGET_TAG: ${{ github.event.inputs.tag || 'all' }}
 
       - name: Commit and push digest updates
         run: |
