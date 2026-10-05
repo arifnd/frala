@@ -11,6 +11,15 @@ on:
 
 #   schedule:
 #     - cron: '0 3 * * 3'   # Runs every Wednesday at 10:00 UTC+7 (03:00 UTC)
+#
+# Note: schedule events carry no inputs, so TARGET_TAG resolves to empty and the
+# `|| 'all'` default below makes the run process every tag in tags.txt.
+
+# Serialize runs so only one job can mutate digests.txt at a time. Prevents a
+# scheduled run and a manual workflow_dispatch from racing on the push.
+concurrency:
+  group: check-build-push
+  cancel-in-progress: false
 
 jobs:
   build-push:
@@ -45,6 +54,7 @@ jobs:
           TARGET_TAG: ${{ github.event.inputs.tag || 'all' }}
 
       - name: Commit and push digest updates
+        if: success()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -54,5 +64,6 @@ jobs:
           else
             git add digests.txt
             git commit -m "Update digests.txt [skip ci]"
+            git pull --rebase --autostash
             git push
           fi

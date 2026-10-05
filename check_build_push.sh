@@ -9,6 +9,12 @@ TAG_FILE="${TAG_FILE:-$SCRIPT_DIR/tags.txt}"
 DIGESTS_FILE="${DIGESTS_FILE:-$SCRIPT_DIR/digests.txt}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
+# Build cache: use the GitHub Actions cache in CI; no-op locally.
+declare -a BUILD_CACHE_ARGS=()
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    BUILD_CACHE_ARGS=(--cache-from type=gha --cache-to type=gha,mode=max)
+fi
+
 # Single source of truth for the moving-alias tags.
 # Bump this one line each PHP release:
 LATEST_PHP="${LATEST_PHP:-php8.5}"
@@ -80,6 +86,7 @@ build_and_push() {
     local tag=$1
     docker buildx build \
         --platform "${PLATFORMS}" \
+        ${BUILD_CACHE_ARGS[@]+"${BUILD_CACHE_ARGS[@]}"} \
         --build-arg IMAGE_TAG="$tag" \
         -t "${IMAGE}:${tag}" \
         --push \
