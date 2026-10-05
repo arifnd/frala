@@ -22,18 +22,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-push:
+  # Decide which tags changed and emit the native build matrix.
+  plan:
     runs-on: ubuntu-latest
-
     permissions:
-      contents: write 
-
+      contents: read
+      actions: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_tags: ${{ steps.plan.outputs.has_tags }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Plan builds
+        id: plan
+        run: |
+          chmod +x ./ci_multiarch.sh
+          ./ci_multiarch.sh plan
+        env:
+          IMAGE: arifnd/frala
+          BASE_IMAGE: dunglas/frankenphp
+          TARGET_TAG: ${{ github.event.inputs.tag || 'all' }}
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: plan.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  # Build each changed tag on a native runner (amd64 and arm64 in parallel).
+  build:
+    needs: plan
+    if: needs.plan.outputs.has_tags == 'true'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -44,14 +79,47 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Run build script
+      - name: Build ${{ matrix.tag }} (${{ matrix.arch }})
         run: |
-          chmod +x ./check_build_push.sh
-          ./check_build_push.sh
+          chmod +x ./ci_multiarch.sh
+          ./ci_multiarch.sh build "${{ matrix.tag }}" "${{ matrix.platform }}"
         env:
           IMAGE: arifnd/frala
-          PLATFORMS: linux/amd64,linux/arm64
-          TARGET_TAG: ${{ github.event.inputs.tag || 'all' }}
+          BASE_IMAGE: dunglas/frankenphp
+
+  # Assemble multi-arch manifests, apply aliases, and update digests.txt.
+  merge:
+    needs: [plan, build]
+    if: always() && needs.plan.outputs.has_tags == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Merge manifests
+        run: |
+          chmod +x ./ci_multiarch.sh
+          ./ci_multiarch.sh merge
+        env:
+          IMAGE: arifnd/frala
+          BASE_IMAGE: dunglas/frankenphp
 
       - name: Commit and push digest updates
         if: success()
