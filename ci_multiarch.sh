@@ -25,6 +25,14 @@ PLAN_FILE="${PLAN_FILE:-$SCRIPT_DIR/plan.tsv}"
 AMD64_RUNNER="${AMD64_RUNNER:-ubuntu-latest}"
 ARM64_RUNNER="${ARM64_RUNNER:-ubuntu-24.04-arm}"
 
+# Docker Hub API used to remove the temporary per-arch tags after the
+# multi-arch manifest has been assembled. The Hub tag-delete endpoint removes
+# only the tag; the underlying manifest stays because the multi-arch index
+# still references it by digest.
+HUB_API="${HUB_API:-https://hub.docker.com}"
+# Set CLEANUP_ARCH_TAGS=0 to keep the <tag>-amd64 / <tag>-arm64 tags.
+CLEANUP_ARCH_TAGS="${CLEANUP_ARCH_TAGS:-1}"
+
 # Single source of truth for the moving-alias tags.
 # Bump this one line each PHP release:
 LATEST_PHP="${LATEST_PHP:-php8.5}"
@@ -89,6 +97,59 @@ apply_aliases() {
     for alias in "${aliases[@]}"; do
         echo "🔖 Applying alias $alias → $tag"
         docker buildx imagetools create -t "${IMAGE}:${alias}" "${IMAGE}:${tag}"
+    done
+}
+
+# Extract a top-level string field from a JSON document on stdin.
+json_field() {
+    local field=$1
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg f "$field" '.[$f] // empty'
+    else
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1],"") or "")' "$field"
+    fi
+}
+
+# Obtain a Docker Hub JWT for the authenticated user.
+hub_token() {
+    [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]] || return 1
+    curl -fsSL -X POST "${HUB_API}/v2/users/login/" \
+        -H 'Content-Type: application/json' \
+        -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+        | json_field token
+}
+
+# Remove a temporary per-arch tag from Docker Hub. Deleting a tag through the
+# Hub API only drops the tag reference; the manifest itself survives because
+# the multi-arch index references it by digest.
+delete_remote_tag() {
+    local tag=$1 repo="$IMAGE" token code
+    token="$(hub_token)" || {
+        echo "⚠️ No Docker Hub credentials; skipping cleanup of ${IMAGE}:${tag}" >&2
+        return 1
+    }
+    [[ -n "$token" ]] || { echo "⚠️ Empty Docker Hub token for ${tag}" >&2; return 1; }
+
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+        -H "Authorization: JWT ${token}" \
+        "${HUB_API}/v2/repositories/${repo}/tags/${tag}/")" || return 1
+
+    case "$code" in
+        2*) return 0 ;;
+        *) echo "⚠️ Failed to delete ${IMAGE}:${tag} (HTTP $code)" >&2; return 1 ;;
+    esac
+}
+
+cleanup_arch_tags() {
+    local tag=$1
+    [[ "$CLEANUP_ARCH_TAGS" == "1" ]] || return 0
+    local arch
+    for arch in amd64 arm64; do
+        if delete_remote_tag "${tag}-${arch}"; then
+            echo "🧹 Removed temporary tag ${IMAGE}:${tag}-${arch}"
+        else
+            echo "⚠️ Kept temporary tag ${IMAGE}:${tag}-${arch}" >&2
+        fi
     done
 }
 
@@ -207,7 +268,7 @@ merge() {
     declare -a FAILED_TAGS=()
     local tmp
     tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' EXIT
+    trap 'rm -f "${tmp:-}"' EXIT
 
     local status tag new old
     while IFS=$'\t' read -r status tag new old || [[ -n "$status" ]]; do
@@ -248,10 +309,15 @@ merge() {
             FAILED_TAGS+=("$tag:alias")
         fi
 
+        # The multi-arch manifest now references both arch manifests, so the
+        # temporary per-arch tags can be removed from the registry.
+        cleanup_arch_tags "$tag"
+
         printf '%s %s\n' "$tag" "$new" >> "$tmp"
     done < "$PLAN_FILE"
 
     mv "$tmp" "$DIGESTS_FILE"
+    trap - EXIT
 
     if (( ${#FAILED_TAGS[@]} > 0 )); then
         echo "❌ Failed tags: ${FAILED_TAGS[*]}" >&2

@@ -120,6 +120,8 @@ jobs:
         env:
           IMAGE: arifnd/frala
           BASE_IMAGE: dunglas/frankenphp
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Commit and push digest updates
         if: success()
