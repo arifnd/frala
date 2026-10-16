@@ -6,11 +6,18 @@ set -euo pipefail
 #
 # Modes:
 #   plan                 Decide which tags changed and emit the build matrix.
-#   build <tag> <plat>   Build one tag for one platform and push IMAGE:<tag>-<arch>.
-#   merge                Assemble multi-arch manifests, aliases, and digests.txt.
+#   build <tag> <plat>   Build one tag for one platform, pushed by digest (no tag).
+#   merge                Assemble multi-arch manifests from those digests, apply
+#                        aliases, and update digests.txt.
+#   cleanup-legacy       Delete leftover IMAGE:<tag>-<arch> tags from Docker Hub.
 #
 # The workflow runs each mode in its own job/runner so arm64 builds natively
 # (ubuntu-24.04-arm) instead of under QEMU.
+#
+# Per-platform builds are pushed by digest (push-by-digest=true) so no
+# <tag>-<arch> tag is ever created on the registry. The digest is written to
+# DIGEST_DIR and shared with the merge job as a build artifact, which then
+# stitches the digests into the multi-arch manifest. Nothing to clean up.
 # =============================================================
 
 # ---------- config (all env-overridable) ----------
@@ -20,18 +27,16 @@ IMAGE="${IMAGE:-arifnd/frala}"
 TAG_FILE="${TAG_FILE:-$SCRIPT_DIR/tags.txt}"
 DIGESTS_FILE="${DIGESTS_FILE:-$SCRIPT_DIR/digests.txt}"
 PLAN_FILE="${PLAN_FILE:-$SCRIPT_DIR/plan.tsv}"
+# One <tag>-<arch>.digest file per completed build. Shared with the merge job.
+DIGEST_DIR="${DIGEST_DIR:-$SCRIPT_DIR/digests}"
 
 # Runner labels for the native per-platform build jobs.
 AMD64_RUNNER="${AMD64_RUNNER:-ubuntu-latest}"
 ARM64_RUNNER="${ARM64_RUNNER:-ubuntu-24.04-arm}"
 
-# Docker Hub API used to remove the temporary per-arch tags after the
-# multi-arch manifest has been assembled. The Hub tag-delete endpoint removes
-# only the tag; the underlying manifest stays because the multi-arch index
-# still references it by digest.
+# Docker Hub API, only used by the one-off `cleanup-legacy` mode to delete
+# pre-existing <tag>-<arch> tags left over from the old tagged-build approach.
 HUB_API="${HUB_API:-https://hub.docker.com}"
-# Set CLEANUP_ARCH_TAGS=0 to keep the <tag>-amd64 / <tag>-arm64 tags.
-CLEANUP_ARCH_TAGS="${CLEANUP_ARCH_TAGS:-1}"
 
 # Single source of truth for the moving-alias tags.
 # Bump this one line each PHP release:
@@ -83,9 +88,12 @@ fetch_remote_digest() {
         --format '{{.Manifest.Digest}}' 2>/dev/null
 }
 
-arch_exists() {
-    local tag=$1 arch=$2
-    docker buildx imagetools inspect "${IMAGE}:${tag}-${arch}" >/dev/null 2>&1
+# Read the manifest digest a build job pushed for one tag/platform pair.
+digest_for() {
+    local tag=$1 arch=$2 file
+    file="${DIGEST_DIR}/${tag}-${arch}.digest"
+    [[ -r "$file" ]] || return 1
+    tr -d '[:space:]' < "$file"
 }
 
 apply_aliases() {
@@ -119,38 +127,35 @@ hub_token() {
         | json_field token
 }
 
-# Remove a temporary per-arch tag from Docker Hub. Deleting a tag through the
-# Hub API only drops the tag reference; the manifest itself survives because
-# the multi-arch index references it by digest.
+# Remove a single tag from Docker Hub. Deleting a tag through the Hub API only
+# drops the tag reference; the manifest itself survives because the multi-arch
+# index references it by digest. Docker Hub requires a PAT with write/delete
+# permission on the repository (Read-only tokens get HTTP 403).
 delete_remote_tag() {
-    local tag=$1 repo="$IMAGE" token code
+    local tag=$1 repo="$IMAGE" token code scheme
+    # Docker Hub registers this route with a trailing slash.
+    local url="${HUB_API}/v2/repositories/${repo}/tags/${tag}/"
+
     token="$(hub_token)" || {
-        echo "⚠️ No Docker Hub credentials; skipping cleanup of ${IMAGE}:${tag}" >&2
+        echo "⚠️ No Docker Hub credentials; cannot delete ${IMAGE}:${tag}" >&2
         return 1
     }
     [[ -n "$token" ]] || { echo "⚠️ Empty Docker Hub token for ${tag}" >&2; return 1; }
 
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
-        -H "Authorization: JWT ${token}" \
-        "${HUB_API}/v2/repositories/${repo}/tags/${tag}/")" || return 1
-
-    case "$code" in
-        2*) return 0 ;;
-        *) echo "⚠️ Failed to delete ${IMAGE}:${tag} (HTTP $code)" >&2; return 1 ;;
-    esac
-}
-
-cleanup_arch_tags() {
-    local tag=$1
-    [[ "$CLEANUP_ARCH_TAGS" == "1" ]] || return 0
-    local arch
-    for arch in amd64 arm64; do
-        if delete_remote_tag "${tag}-${arch}"; then
-            echo "🧹 Removed temporary tag ${IMAGE}:${tag}-${arch}"
-        else
-            echo "⚠️ Kept temporary tag ${IMAGE}:${tag}-${arch}" >&2
-        fi
+    # Current docs use `Bearer`; older Hub clients used `JWT`. Try both.
+    for scheme in Bearer JWT; do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+            -H "Authorization: ${scheme} ${token}" \
+            "$url")" || return 1
+        case "$code" in
+            2*|404) return 0 ;;
+            401|403) continue ;;
+            *) echo "⚠️ Failed to delete ${IMAGE}:${tag} (HTTP $code)" >&2; return 1 ;;
+        esac
     done
+
+    echo "⚠️ Failed to delete ${IMAGE}:${tag} (HTTP ${code}). A PAT with write/delete scope is required." >&2
+    return 1
 }
 
 set_output() {
@@ -248,14 +253,34 @@ build() {
         )
     fi
 
-    echo "🛠️ Building ${IMAGE}:${tag}-${arch} for ${platform} (cache scope: ${scope})"
+    mkdir -p "$DIGEST_DIR"
+    local meta
+    meta="$(mktemp)"
+    trap 'rm -f "${meta:-}"' EXIT
+
+    # Push by digest: the image is stored under its content digest only, so no
+    # ${tag}-${arch} tag is ever created on the registry.
+    echo "🛠️ Building ${IMAGE}:${tag} for ${platform} (push-by-digest, cache scope: ${scope})"
     docker buildx build \
         --platform "$platform" \
         ${cache_args[@]+"${cache_args[@]}"} \
         --build-arg IMAGE_TAG="$tag" \
-        -t "${IMAGE}:${tag}-${arch}" \
-        --push \
+        --output "type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true" \
+        --metadata-file "$meta" \
         .
+
+    local digest
+    digest="$(json_field containerimage.digest < "$meta")"
+    rm -f "$meta"
+    trap - EXIT
+
+    [[ -n "$digest" ]] || {
+        echo "❌ Build for ${IMAGE}:${tag} (${arch}) produced no digest" >&2
+        exit 1
+    }
+
+    printf '%s\n' "$digest" > "${DIGEST_DIR}/${tag}-${arch}.digest"
+    echo "📦 ${tag} (${arch}) → ${digest}"
 }
 
 merge() {
@@ -281,9 +306,12 @@ merge() {
             continue
         fi
 
-        # status == changed: both native builds must exist.
-        if ! arch_exists "$tag" amd64 || ! arch_exists "$tag" arm64; then
-            echo "⚠️ Missing amd64/arm64 image for $tag; keeping old digest." >&2
+        # status == changed: both native build digests must be present.
+        local d_amd d_arm
+        d_amd="$(digest_for "$tag" amd64 || true)"
+        d_arm="$(digest_for "$tag" arm64 || true)"
+        if [[ -z "$d_amd" || -z "$d_arm" ]]; then
+            echo "⚠️ Missing amd64/arm64 digest for $tag; keeping old digest." >&2
             FAILED_TAGS+=("$tag:incomplete")
             if [[ -n "$old" && "$old" != "-" ]]; then
                 printf '%s %s\n' "$tag" "$old" >> "$tmp"
@@ -294,8 +322,8 @@ merge() {
         echo "🔗 Assembling multi-arch manifest for ${IMAGE}:${tag}"
         if ! docker buildx imagetools create \
             -t "${IMAGE}:${tag}" \
-            "${IMAGE}:${tag}-amd64" \
-            "${IMAGE}:${tag}-arm64"; then
+            "${IMAGE}@${d_amd}" \
+            "${IMAGE}@${d_arm}"; then
             echo "⚠️ Manifest merge failed for $tag; keeping old digest." >&2
             FAILED_TAGS+=("$tag:merge")
             if [[ -n "$old" && "$old" != "-" ]]; then
@@ -308,10 +336,6 @@ merge() {
             echo "⚠️ Alias tagging failed for $tag (image itself pushed)" >&2
             FAILED_TAGS+=("$tag:alias")
         fi
-
-        # The multi-arch manifest now references both arch manifests, so the
-        # temporary per-arch tags can be removed from the registry.
-        cleanup_arch_tags "$tag"
 
         printf '%s %s\n' "$tag" "$new" >> "$tmp"
     done < "$PLAN_FILE"
@@ -327,6 +351,30 @@ merge() {
     echo "✅ digests.txt updated"
 }
 
+# One-off migration helper: delete <tag>-amd64 / <tag>-arm64 tags left over on
+# Docker Hub from the old tagged-build approach. Not needed for new builds,
+# which push by digest and never create those tags. Requires a PAT with
+# write/delete permission on IMAGE (DOCKERHUB_USERNAME + DOCKERHUB_TOKEN).
+cleanup_legacy() {
+    require_cmd curl
+    local tag arch failed=0
+    while IFS= read -r tag; do
+        for arch in amd64 arm64; do
+            if delete_remote_tag "${tag}-${arch}"; then
+                echo "🧹 Removed ${IMAGE}:${tag}-${arch}"
+            else
+                failed=1
+            fi
+        done
+    done < <(read_tags)
+
+    if (( failed )); then
+        echo "⚠️ Some tags could not be removed. Check the PAT scope for ${IMAGE}." >&2
+        exit 1
+    fi
+    echo "✅ Legacy per-arch tags removed"
+}
+
 # ---------- dispatch ----------
 case "${1:-}" in
     plan) plan ;;
@@ -335,8 +383,9 @@ case "${1:-}" in
         build "$@"
         ;;
     merge) merge ;;
+    cleanup-legacy) cleanup_legacy ;;
     *)
-        echo "Usage: $0 {plan | build <tag> <platform> | merge}" >&2
+        echo "Usage: $0 {plan | build <tag> <platform> | merge | cleanup-legacy}" >&2
         exit 2
         ;;
 esac

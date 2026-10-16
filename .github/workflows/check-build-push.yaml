@@ -87,6 +87,16 @@ jobs:
           IMAGE: arifnd/frala
           BASE_IMAGE: dunglas/frankenphp
 
+      # Hand the pushed digest to the merge job. Each matrix entry uploads its
+      # own artifact; merge downloads them all and stitches them together.
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.tag }}-${{ matrix.arch }}
+          path: digests/
+          if-no-files-found: error
+          retention-days: 1
+
   # Assemble multi-arch manifests, apply aliases, and update digests.txt.
   merge:
     needs: [plan, build]
@@ -104,6 +114,13 @@ jobs:
         with:
           name: plan
 
+      - name: Download build digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: digests
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -120,8 +137,6 @@ jobs:
         env:
           IMAGE: arifnd/frala
           BASE_IMAGE: dunglas/frankenphp
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Commit and push digest updates
         if: success()

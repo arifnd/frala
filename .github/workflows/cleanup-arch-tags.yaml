@@ -1,0 +1,28 @@
+name: Cleanup legacy per-arch tags
+
+# One-off maintenance job: deletes the <tag>-amd64 / <tag>-arm64 tags that the
+# old tagged-build approach left on Docker Hub. New builds push by digest and
+# never create these tags, so this only needs to run until the repo is tidy.
+#
+# Requires DOCKERHUB_USERNAME / DOCKERHUB_TOKEN with write (delete) permission
+# on the repository. If deletions fail with HTTP 403, use the Docker Hub web UI
+# to remove the tags instead.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Delete legacy per-arch tags
+        run: |
+          chmod +x ./ci_multiarch.sh
+          ./ci_multiarch.sh cleanup-legacy
+        env:
+          IMAGE: arifnd/frala
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
