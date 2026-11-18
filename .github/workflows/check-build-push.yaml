@@ -9,9 +9,9 @@ on:
         default: 'all'
         type: string
 
-#   schedule:
-#     - cron: '0 3 * * 3'   # Runs every Wednesday at 10:00 UTC+7 (03:00 UTC)
-#
+  schedule:
+    - cron: '0 3 * * 3'   # Runs every Wednesday at 10:00 UTC+7 (03:00 UTC)
+
 # Note: schedule events carry no inputs, so TARGET_TAG resolves to empty and the
 # `|| 'all'` default below makes the run process every tag in tags.txt.
 
